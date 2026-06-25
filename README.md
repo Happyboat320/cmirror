@@ -9,6 +9,7 @@ Cmirror 是一个基于 Rust 编写的跨平台命令行工具，旨在解决国
 * **⚡️ 极速体验**: 使用 HTTP/HTTPS `HEAD` 请求并发测试所有镜像源延迟，精准计算首字节时间。
 * **🛡️ 安全无忧**: 修改任何配置前强制自动备份，支持一键恢复 (`restore`)。
 * **🧠 智能推荐**: 支持 `--fastest` 参数，自动选择并应用当前网络环境下最快的源。
+* **🧩 自动批量**: 支持 `auto` 命令，自动检测已安装工具，跳过未安装项，并逐个应用最快源。
 * **📊 状态透视**: 一目了然地查看当前所有工具正在使用的源地址及状态。
 
 ## 📦 支持列表
@@ -25,6 +26,8 @@ Cmirror 是一个基于 Rust 编写的跨平台命令行工具，旨在解决国
 | **go**（Golang） | ✅ 支持 | 环境变量（`GOPROXY`） | 使用 `go env` 管理 |
 | **brew**（Homebrew） | ✅ 支持 | 环境变量 | 提供 `export` 命令提示 |
 | **huggingface** | ✅ 支持 | 环境变量（`HF_ENDPOINT`） | 提供 `export` 命令提示 |
+
+> apt 会优先识别新版 Ubuntu 的 Deb822 配置文件 `/etc/apt/sources.list.d/ubuntu.sources`，不存在时回退到传统 `/etc/apt/sources.list`。Deb822 格式下会先读取第一条 `URIs:`，只替换文件中与这条 URL 完全相同的源，避免误改其他自定义源。
 
 ## 🚀 安装指南
 
@@ -148,6 +151,11 @@ brew       Not Installed                            [Not Installed]
 
 也可以只查看特定工具：`cmirror status pip`
 
+状态含义：
+
+* `Not Installed`: 未检测到工具或相关配置，`use` 和 `restore` 会跳过并报错。
+* `Not Detected`: 已检测到工具，但未读取到当前镜像源配置，通常表示仍在使用默认源或配置位置未显式写入。
+
 ### 2. 测速对比
 
 测试并列出可用镜像源的延迟排名：
@@ -170,7 +178,7 @@ $ cmirror test pip
 
 ### 3. 切换镜像源
 
-**自动选择最快源 (推荐):**
+**自动选择最快源（推荐）：**
 
 ```bash
 cmirror use pip --fastest
@@ -184,6 +192,10 @@ cmirror use pip aliyun
 
 *注意：修改 Docker, Apt 等系统级配置时可能需要 root 权限，请使用 `sudo cmirror use docker ...`*
 
+`use` 执行前会先检测对应工具是否安装；如果工具未安装或没有可检测配置，会直接报错并跳过写入，避免无意义地创建配置文件。
+
+对于 Hugging Face 和 Homebrew 这类主要依赖环境变量的工具，`use` 会输出需要执行的 `export` 命令，用户可按需写入 shell 配置文件。
+
 ### 4. 自动批量换源
 
 检查当前机器已安装的所有支持工具，跳过未安装项，并为已安装项测速后应用最快源：
@@ -193,6 +205,8 @@ cmirror auto
 ```
 
 执行过程中会逐个输出工具检测、测速、跳过或应用结果。Docker、Apt 等系统级配置仍可能需要使用 `sudo cmirror auto`。
+
+`auto` 只处理已安装或已有可检测配置的工具；未安装项会显示跳过，不会创建新的配置文件。
 
 ### 5. 恢复配置
 
@@ -204,15 +218,20 @@ cmirror restore pip
 
 *(注：对于 pip、npm、docker、cargo、apt，这将恢复最近的 `.bak` 备份文件；对于 go、brew，将重置或提示取消环境变量)*
 
+`restore` 执行前同样会检测对应工具是否安装。对于 Hugging Face，会提示取消 `HF_ENDPOINT` 环境变量。
+
 ## 🛠️ 开发计划
 
 * [x] 基础 CLI 框架（`status`、`test`、`use`）
 * [x] 支持 pip、npm
+* [x] 支持 uv、conda
 * [x] 支持 Docker（Linux/macOS）
-* [x] 支持 apt（Ubuntu/Debian）
+* [x] 支持 apt（Ubuntu/Debian，含新版 `ubuntu.sources`）
 * [x] 支持 Rust Cargo、Go Modules
 * [x] 支持 Homebrew（环境变量提示）
+* [x] 支持 Hugging Face（`HF_ENDPOINT`）
 * [x] `restore` 灾难恢复命令
+* [x] `auto` 自动批量换源命令
 * [ ] 支持 yum/dnf（CentOS/Fedora）
 * [ ] 终端交互界面（Dialoguer）
 
