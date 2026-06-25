@@ -2,6 +2,7 @@ use crate::config;
 use crate::error::{MirrorError, Result};
 use crate::traits::SourceManager;
 use crate::types::Mirror;
+use crate::utils;
 use async_trait::async_trait;
 use std::path::PathBuf;
 use tokio::process::Command;
@@ -22,6 +23,10 @@ impl SourceManager for GoManager {
 
     fn requires_sudo(&self) -> bool {
         false
+    }
+
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("go")
     }
 
     fn list_candidates(&self) -> Vec<Mirror> {

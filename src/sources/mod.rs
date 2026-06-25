@@ -4,6 +4,7 @@ pub mod cargo;
 pub mod conda;
 pub mod docker;
 pub mod go;
+pub mod huggingface;
 pub mod npm;
 pub mod pip;
 pub mod uv;
@@ -12,7 +13,16 @@ use crate::error::{MirrorError, Result};
 use crate::traits::SourceManager;
 
 pub const SUPPORTED_TOOLS: &[&str] = &[
-    "pip", "npm", "docker", "go", "cargo", "brew", "apt", "uv", "conda",
+    "pip",
+    "npm",
+    "docker",
+    "go",
+    "cargo",
+    "brew",
+    "apt",
+    "uv",
+    "conda",
+    "huggingface",
 ];
 
 pub fn get_manager(name: &str) -> Result<Box<dyn SourceManager>> {
@@ -26,6 +36,7 @@ pub fn get_manager(name: &str) -> Result<Box<dyn SourceManager>> {
         "apt" => Ok(Box::new(apt::AptManager::new())),
         "uv" => Ok(Box::new(uv::UvManager::new())),
         "conda" => Ok(Box::new(conda::CondaManager::new())),
+        "huggingface" | "hf" => Ok(Box::new(huggingface::HuggingFaceManager::new())),
         _ => Err(MirrorError::UnknownTool(format!(
             "Unsupported tool: '{}'. Available: {}",
             name,

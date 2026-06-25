@@ -3,11 +3,45 @@ use crate::types::{BenchmarkResult, Mirror};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Client;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs;
 
 // 设置全局请求超时，防止慢源阻塞整个流程太久
 const REQUEST_TIMEOUT: u64 = 3;
+
+/// Check whether a command can be found in PATH.
+pub fn command_exists(command: &str) -> bool {
+    let path_var = match std::env::var_os("PATH") {
+        Some(path) => path,
+        None => return false,
+    };
+
+    let paths = std::env::split_paths(&path_var);
+
+    #[cfg(target_os = "windows")]
+    let extensions: Vec<String> = std::env::var_os("PATHEXT")
+        .map(|v| {
+            std::env::split_paths(&v)
+                .map(|p| p.to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec![".exe".to_string(), ".cmd".to_string(), ".bat".to_string()]);
+
+    #[cfg(not(target_os = "windows"))]
+    let extensions: Vec<String> = vec!["".to_string()];
+
+    for dir in paths {
+        for ext in &extensions {
+            let candidate: PathBuf = dir.join(format!("{}{}", command, ext));
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
 
 /// 备份文件 (如果有)
 /// 文件名格式: original.ext -> original.ext.bak.TIMESTAMP

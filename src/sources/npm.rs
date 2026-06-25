@@ -36,6 +36,10 @@ impl SourceManager for NpmManager {
         false
     }
 
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("npm")
+    }
+
     fn list_candidates(&self) -> Vec<Mirror> {
         config::get_candidates("npm")
     }

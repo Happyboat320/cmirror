@@ -8,6 +8,7 @@ mod utils;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use sources::get_manager;
+use traits::SourceManager;
 use types::Mirror;
 
 #[derive(Parser)]
@@ -48,6 +49,8 @@ enum Commands {
         /// The tool name
         name: String,
     },
+    /// Apply the fastest mirror for every installed supported tool
+    Auto,
 }
 
 #[tokio::main]
@@ -63,6 +66,7 @@ async fn main() -> Result<()> {
             fastest,
         } => handle_use(&name, source, fastest).await?,
         Commands::Restore { name } => handle_restore(&name).await?,
+        Commands::Auto => handle_auto().await?,
     }
 
     Ok(())
@@ -89,6 +93,8 @@ async fn handle_status(name: Option<String>) -> Result<()> {
             Err(_) => continue,
         };
 
+        let is_installed = manager.is_installed().await;
+
         // Handle potential errors gracefully instead of crashing the whole status command
         let current_url_res = manager.current_url().await;
 
@@ -107,7 +113,8 @@ async fn handle_status(name: Option<String>) -> Result<()> {
 
                 (url, format!("[{}]", known_name))
             }
-            None => ("Default".to_string(), "[Official/Default]".to_string()),
+            None if is_installed => ("Not Detected".to_string(), "[Not Detected]".to_string()),
+            None => ("Not Installed".to_string(), "[Not Installed]".to_string()),
         };
 
         // Truncate URL if too long
@@ -234,6 +241,13 @@ async fn handle_test(name: &str) -> Result<()> {
 async fn handle_use(name: &str, source_name: Option<String>, fastest: bool) -> Result<()> {
     let manager = get_manager(name)?;
 
+    if !manager.is_installed().await {
+        bail!(
+            "{} is not installed or has no detectable config. Skipping use.",
+            manager.name()
+        );
+    }
+
     // 检查权限
     if manager.requires_sudo() {
         eprintln!(
@@ -245,25 +259,7 @@ async fn handle_use(name: &str, source_name: Option<String>, fastest: bool) -> R
     // 这一大段代码是为了计算出 target_mirror
     // 注意：整个 if-else 表达式最后需要一个分号
     let target_mirror = if fastest {
-        println!("Finding fastest mirror...");
-        let results = utils::benchmark_mirrors(manager.list_candidates()).await;
-
-        // 过滤掉超时的 (u64::MAX)
-        let valid_results: Vec<_> = results
-            .into_iter()
-            .filter(|r| r.latency_ms < u64::MAX)
-            .collect();
-
-        if valid_results.is_empty() {
-            bail!("All mirrors timed out. Please check your network connection.");
-        }
-
-        let best = &valid_results[0];
-        println!(
-            "Fastest mirror is {} ({}ms)",
-            best.mirror.name, best.latency_ms
-        );
-        best.mirror.clone() // 返回给 target_mirror
+        select_fastest_mirror(manager.as_ref()).await?
     } else {
         // 按名称查找
         // unwrap 是安全的，因为 clap 配置中 required_unless_present = "fastest" 保证了 source_name 存在
@@ -289,8 +285,117 @@ async fn handle_use(name: &str, source_name: Option<String>, fastest: bool) -> R
     Ok(())
 }
 
+async fn select_fastest_mirror(manager: &dyn SourceManager) -> Result<Mirror> {
+    println!("Finding fastest mirror...");
+    let results = utils::benchmark_mirrors(manager.list_candidates()).await;
+
+    // 过滤掉超时的 (u64::MAX)
+    let valid_results: Vec<_> = results
+        .into_iter()
+        .filter(|r| r.latency_ms < u64::MAX)
+        .collect();
+
+    if valid_results.is_empty() {
+        bail!("All mirrors timed out. Please check your network connection.");
+    }
+
+    let best = &valid_results[0];
+    println!(
+        "Fastest mirror is {} ({}ms)",
+        best.mirror.name, best.latency_ms
+    );
+
+    Ok(best.mirror.clone())
+}
+
+async fn handle_auto() -> Result<()> {
+    println!("Auto mode: checking installed tools and applying the fastest available mirror.");
+
+    let mut applied = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for tool_name in sources::SUPPORTED_TOOLS {
+        println!();
+        println!("{}", "-".repeat(70));
+        println!("Tool: {}", tool_name);
+
+        let manager = match get_manager(tool_name) {
+            Ok(m) => m,
+            Err(e) => {
+                failed += 1;
+                eprintln!("Failed to initialize manager: {}", e);
+                continue;
+            }
+        };
+
+        println!("Checking whether {} is installed...", manager.name());
+        if !manager.is_installed().await {
+            skipped += 1;
+            println!(
+                "Skipped: {} is not installed or has no detectable config.",
+                manager.name()
+            );
+            continue;
+        }
+
+        if manager.requires_sudo() {
+            eprintln!(
+                "Note: Modifying {} config usually requires sudo/root permissions.",
+                manager.name()
+            );
+        }
+
+        let target_mirror = match select_fastest_mirror(manager.as_ref()).await {
+            Ok(mirror) => mirror,
+            Err(e) => {
+                failed += 1;
+                eprintln!("Skipped: failed to benchmark {}: {}", manager.name(), e);
+                continue;
+            }
+        };
+
+        println!("Backing up and applying {}...", target_mirror.name);
+        match manager.set_source(&target_mirror).await {
+            Ok(()) => {
+                applied += 1;
+                println!(
+                    "Success! {} is now using {}.",
+                    manager.name(),
+                    target_mirror.name
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!(
+                    "Failed to apply {} for {}: {}",
+                    target_mirror.name,
+                    manager.name(),
+                    e
+                );
+            }
+        }
+    }
+
+    println!();
+    println!("{}", "-".repeat(70));
+    println!(
+        "Auto mode completed. Applied: {}, skipped: {}, failed: {}.",
+        applied, skipped, failed
+    );
+
+    Ok(())
+}
+
 async fn handle_restore(name: &str) -> Result<()> {
     let manager = get_manager(name)?;
+
+    if !manager.is_installed().await {
+        bail!(
+            "{} is not installed or has no detectable config. Skipping restore.",
+            manager.name()
+        );
+    }
 
     if manager.requires_sudo() {
         eprintln!(

@@ -35,6 +35,10 @@ impl SourceManager for UvManager {
         false
     }
 
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("uv") || fs::try_exists(self.config_path()).await.unwrap_or(false)
+    }
+
     fn list_candidates(&self) -> Vec<Mirror> {
         config::get_candidates("uv")
     }

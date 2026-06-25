@@ -12,6 +12,9 @@ pub trait SourceManager: Sync + Send {
     /// 是否需要 Root 权限 (如 apt, docker 需要 sudo)
     fn requires_sudo(&self) -> bool;
 
+    /// 检测当前机器是否安装了对应工具
+    async fn is_installed(&self) -> bool;
+
     /// 获取内置的推荐源列表
     fn list_candidates(&self) -> Vec<Mirror>;
 

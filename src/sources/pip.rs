@@ -36,6 +36,13 @@ impl SourceManager for PipManager {
         false
     }
 
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("pip")
+            || utils::command_exists("pip3")
+            || utils::command_exists("python")
+            || utils::command_exists("python3")
+    }
+
     fn list_candidates(&self) -> Vec<Mirror> {
         config::get_candidates("pip")
     }

@@ -27,6 +27,10 @@ impl SourceManager for DockerManager {
         true
     }
 
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("docker") || fs::try_exists(self.config_path()).await.unwrap_or(false)
+    }
+
     fn list_candidates(&self) -> Vec<Mirror> {
         config::get_candidates("docker")
     }

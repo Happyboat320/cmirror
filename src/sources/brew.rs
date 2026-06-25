@@ -2,6 +2,7 @@ use crate::config;
 use crate::error::Result;
 use crate::traits::SourceManager;
 use crate::types::Mirror;
+use crate::utils;
 use async_trait::async_trait;
 use std::path::PathBuf;
 
@@ -21,6 +22,10 @@ impl SourceManager for BrewManager {
 
     fn requires_sudo(&self) -> bool {
         false
+    }
+
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("brew") || std::env::var("HOMEBREW_API_DOMAIN").is_ok()
     }
 
     fn list_candidates(&self) -> Vec<Mirror> {

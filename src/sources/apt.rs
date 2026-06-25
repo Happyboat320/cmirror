@@ -8,6 +8,9 @@ use regex::Regex;
 use std::path::PathBuf;
 use tokio::fs;
 
+const LEGACY_APT_SOURCES: &str = "/etc/apt/sources.list";
+const UBUNTU_DEB822_SOURCES: &str = "/etc/apt/sources.list.d/ubuntu.sources";
+
 pub struct AptManager {
     distro: String,
     custom_path: Option<PathBuf>,
@@ -43,9 +46,9 @@ impl AptManager {
             }
         }
         // Fallback: check file existence
-        if std::path::Path::new("/etc/apt/sources.list").exists() {
+        if std::path::Path::new(LEGACY_APT_SOURCES).exists() {
             // Maybe try to guess from content?
-            if let Ok(c) = std::fs::read_to_string("/etc/apt/sources.list") {
+            if let Ok(c) = std::fs::read_to_string(LEGACY_APT_SOURCES) {
                 if c.contains("ubuntu") {
                     return Some("ubuntu".to_string());
                 }
@@ -71,6 +74,12 @@ impl SourceManager for AptManager {
         true
     }
 
+    async fn is_installed(&self) -> bool {
+        utils::command_exists("apt")
+            || utils::command_exists("apt-get")
+            || fs::try_exists(self.config_path()).await.unwrap_or(false)
+    }
+
     fn list_candidates(&self) -> Vec<Mirror> {
         let key = format!("apt-{}", self.distro);
         config::get_candidates(&key)
@@ -80,7 +89,14 @@ impl SourceManager for AptManager {
         if let Some(ref path) = self.custom_path {
             return path.clone();
         }
-        PathBuf::from("/etc/apt/sources.list")
+
+        // Ubuntu 24.04+ 常把官方源放在 Deb822 格式的 ubuntu.sources 中。
+        // 检测到新版文件时优先使用，否则保持传统 sources.list 行为。
+        if std::path::Path::new(UBUNTU_DEB822_SOURCES).exists() {
+            PathBuf::from(UBUNTU_DEB822_SOURCES)
+        } else {
+            PathBuf::from(LEGACY_APT_SOURCES)
+        }
     }
 
     async fn current_url(&self) -> Result<Option<String>> {
@@ -91,15 +107,11 @@ impl SourceManager for AptManager {
 
         let content = fs::read_to_string(&path).await?;
 
-        // Find the first active 'deb' line
-        // Regex: ^deb\s+(?:\[.*?\]\s+)?(\S+)\s+
-        let re = Regex::new(r"(?m)^deb\s+(?:\[.*?\]\s+)?(?P<url>https?://\S+)\s+")?;
-
-        if let Some(caps) = re.captures(&content) {
-            Ok(Some(caps["url"].to_string()))
-        } else {
-            Ok(None)
+        if let Some(url) = Self::current_deb822_url(&content)? {
+            return Ok(Some(url));
         }
+
+        Self::current_legacy_url(&content)
     }
 
     async fn set_source(&self, mirror: &Mirror) -> Result<()> {
@@ -114,42 +126,16 @@ impl SourceManager for AptManager {
         let content = fs::read_to_string(&path).await?;
         utils::backup_file(&path).await?;
 
-        // Strategy: Replace the base URL of the main repo.
-        // We need to know what the CURRENT URL is to replace it.
-        // But the user might have mixed sources.
-        // Safe bet: Replace lines that look like the distro's main repo.
-
         let target_url = if mirror.url.ends_with('/') {
             mirror.url.clone()
         } else {
             format!("{}/", mirror.url)
         };
 
-        // Determine what to replace.
-        // If we found a current URL, replace IT.
-        let current = self.current_url().await?;
-
-        let new_content = if let Some(cur_url) = current {
-            // Replace all occurrences of current_url with mirror.url
-            // Note: Use simple string replacement to avoid regex escaping issues,
-            // but be careful about partial matches.
-            content.replace(&cur_url, &target_url)
+        let new_content = if Self::is_deb822_sources(&content) {
+            Self::replace_deb822_uris(&content, &target_url)?
         } else {
-            // If we couldn't detect current URL, maybe we shouldn't touch it?
-            // Or try to replace known default domains?
-            let default_domains = if self.distro == "ubuntu" {
-                vec!["archive.ubuntu.com/ubuntu/", "security.ubuntu.com/ubuntu/"]
-            } else {
-                vec!["deb.debian.org/debian/", "security.debian.org/debian/"]
-            };
-
-            let mut modified = content.clone();
-            for domain in default_domains {
-                // Try to replace HTTP and HTTPS variants
-                modified = modified.replace(&format!("http://{}", domain), &target_url);
-                modified = modified.replace(&format!("https://{}", domain), &target_url);
-            }
-            modified
+            self.replace_legacy_sources(&content, &target_url).await?
         };
 
         fs::write(&path, new_content).await?;
@@ -158,6 +144,70 @@ impl SourceManager for AptManager {
 
     async fn restore(&self) -> Result<()> {
         utils::restore_latest_backup(&self.config_path()).await
+    }
+}
+
+impl AptManager {
+    fn is_deb822_sources(content: &str) -> bool {
+        content
+            .lines()
+            .any(|line| line.trim_start().to_ascii_lowercase().starts_with("uris:"))
+    }
+
+    fn current_deb822_url(content: &str) -> Result<Option<String>> {
+        let re = Regex::new(r"(?m)^URIs:\s+(?P<url>https?://\S+)")?;
+
+        if let Some(caps) = re.captures(content) {
+            Ok(Some(caps["url"].to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn current_legacy_url(content: &str) -> Result<Option<String>> {
+        // 查找第一条启用的 deb 源行。
+        // 格式：deb [可选参数] http://... suite component...
+        let re = Regex::new(r"(?m)^deb\s+(?:\[.*?\]\s+)?(?P<url>https?://\S+)\s+")?;
+
+        if let Some(caps) = re.captures(content) {
+            Ok(Some(caps["url"].to_string()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn replace_deb822_uris(content: &str, target_url: &str) -> Result<String> {
+        if let Some(cur_url) = Self::current_deb822_url(content)? {
+            Ok(content.replace(&cur_url, target_url))
+        } else {
+            Ok(content.to_string())
+        }
+    }
+
+    async fn replace_legacy_sources(&self, content: &str, target_url: &str) -> Result<String> {
+        // 传统 sources.list 格式保留 suite/component，仅替换仓库 URL。
+        let current = Self::current_legacy_url(content)?;
+        let new_content = if let Some(cur_url) = current {
+            // 直接替换已检测到的当前源地址，避免正则转义带来的边界问题。
+            content.replace(&cur_url, &target_url)
+        } else {
+            // 未检测到当前源时，只尝试替换发行版默认域名。
+            let default_domains = if self.distro == "ubuntu" {
+                vec!["archive.ubuntu.com/ubuntu/", "security.ubuntu.com/ubuntu/"]
+            } else {
+                vec!["deb.debian.org/debian/", "security.debian.org/debian/"]
+            };
+
+            let mut modified = content.to_string();
+            for domain in default_domains {
+                // 同时处理 HTTP 和 HTTPS 写法。
+                modified = modified.replace(&format!("http://{}", domain), target_url);
+                modified = modified.replace(&format!("https://{}", domain), target_url);
+            }
+            modified
+        };
+
+        Ok(new_content)
     }
 }
 
@@ -171,7 +221,7 @@ mod tests {
         let dir = tempdir()?;
         let config_path = dir.path().join("sources.list");
 
-        // Prepare a dummy sources.list
+        // 准备传统 sources.list 测试内容。
         let initial_content = r#"
 # Main repo
 deb http://archive.ubuntu.com/ubuntu/ jammy main restricted
@@ -183,41 +233,74 @@ deb http://security.ubuntu.com/ubuntu/ jammy-security main restricted
 
         let manager = AptManager::with_distro_and_path("ubuntu".to_string(), config_path.clone());
 
-        // 1. Initial detection
-        // Note: current_url returns the FIRST match.
-        // In our sample, it matches "http://archive.ubuntu.com/ubuntu/"
+        // current_url 会返回第一条启用源。
         assert_eq!(
             manager.current_url().await?,
             Some("http://archive.ubuntu.com/ubuntu/".to_string())
         );
 
-        // 2. Set source
         let mirror = Mirror {
             name: "TestApt".to_string(),
             url: "http://mirrors.test.com/ubuntu/".to_string(),
         };
         manager.set_source(&mirror).await?;
 
-        // 3. Check file content
         let new_content = fs::read_to_string(&config_path).await?;
         assert!(new_content.contains("deb http://mirrors.test.com/ubuntu/ jammy main"));
-        // Check if security line also got replaced (depends on logic)
-        // Our logic: "Replace all occurrences of current_url with mirror.url"
-        // Since current_url was detected as "http://archive.ubuntu.com/ubuntu/",
-        // and security url is "http://security.ubuntu.com/ubuntu/", it might NOT be replaced unless
-        // logic falls back to default domains or handles multiple.
-
-        // Current logic:
-        // let current = self.current_url().await?; // Gets FIRST match
-        // if let Some(cur_url) = current { content.replace(&cur_url, &target_url) }
-
-        // So it only replaces "archive.ubuntu.com" lines. "security.ubuntu.com" remains.
-        // This is actually "safe" behavior (don't mess with security unless intended),
-        // but PRD requirement "apt" usually implies replacing main source.
-
+        // 传统格式只替换检测到的主源，security 源保持原样。
         assert!(new_content.contains("deb http://security.ubuntu.com/ubuntu/ jammy-security"));
 
-        // 4. Restore
+        manager.restore().await?;
+        let restored_content = fs::read_to_string(&config_path).await?;
+        assert_eq!(restored_content, initial_content);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_apt_deb822_ubuntu_sources_flow() -> Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("ubuntu.sources");
+
+        let initial_content = r#"Types: deb
+URIs: http://archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu/
+Suites: noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+"#;
+        fs::write(&config_path, initial_content).await?;
+
+        let manager = AptManager::with_distro_and_path("ubuntu".to_string(), config_path.clone());
+
+        assert_eq!(
+            manager.current_url().await?,
+            Some("http://archive.ubuntu.com/ubuntu/".to_string())
+        );
+
+        let mirror = Mirror {
+            name: "TestAptDeb822".to_string(),
+            url: "http://mirrors.test.com/ubuntu/".to_string(),
+        };
+        manager.set_source(&mirror).await?;
+
+        let new_content = fs::read_to_string(&config_path).await?;
+        assert!(new_content.contains("URIs: http://mirrors.test.com/ubuntu/"));
+        assert_eq!(
+            new_content
+                .matches("URIs: http://mirrors.test.com/ubuntu/")
+                .count(),
+            1
+        );
+        assert!(new_content.contains("URIs: http://security.ubuntu.com/ubuntu/"));
+        assert!(new_content.contains("Suites: noble noble-updates noble-backports"));
+        assert!(new_content.contains("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"));
+
         manager.restore().await?;
         let restored_content = fs::read_to_string(&config_path).await?;
         assert_eq!(restored_content, initial_content);
